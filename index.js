@@ -1,185 +1,207 @@
+// ──────────────────────────────────────────────
 // index.js – Bot de liquidaciones (OKX + Binance + Huobi)
 // ==========================================================
-// Características principales
-// • Envía mensaje inicial "🚀 Bot activo" a Telegram.
-// • Conexiones WebSocket: OKX (liquidations‑orders), Binance (!forceOrder@arr), Huobi (liquidation_orders).
-// • Huobi: obtiene la lista de pares admitidos vía REST y se re‑suscribe **cada hora**.
-// • Reconexión automática y ping/keep‑alive en todos los WebSockets.
-// • Cola de envío anti‑spam (máx 20 msg/s) para cumplir con límites de Telegram.
-// • Variables de entorno (definidas en Cloud Run / Secret Manager):
-//     TELEGRAM_TOKEN, CHAT_ID
+// Funciones clave:
+//   • Envía mensaje inicial "🚀 Bot activo" al arrancar.
+//   • Conexiones WebSocket:
+//       🟢 OKX  – channel: liquidation-orders  (ping keep‑alive 15 s)
+//       🟡 Binance – stream: !forceOrder@arr     (ping 30 s)
+//       🔴 Huobi  – linear-swap (REST + WS, gzip) (ping/pong + recarga de pares 1 h)
+//   • Reconexión automática con back‑off.
+//   • Cola anti‑spam (máx. 20 msg/s) para Telegram.
+//   • Variables de entorno: TELEGRAM_TOKEN, CHAT_ID  (mismas que en Cloud Run).
+// ──────────────────────────────────────────────
 
-// ─── Dependencias ──────────────────────────────────────────
-require('dotenv').config();
-const express   = require('express');
-const fetch     = require('node-fetch');
-const WebSocket = require('ws');
-const zlib      = require('zlib');
+require("dotenv").config();
+const express = require("express");
+const fetch = require("node-fetch");
+const WebSocket = require("ws");
+const zlib = require("zlib"); // Para descomprimir mensajes gzip de Huobi
 
-// ─── Config Express (HealthCheck) ─────────────────────────
-const app  = express();
-const PORT = process.env.PORT || 8080;
-app.get('/health', (_, res) => res.send('✅ Bot activo'));
-app.listen(PORT, () => console.log(`🌐 HTTP vivo en puerto ${PORT}`));
-
-// ─── Config Telegram ──────────────────────────────────────
+// ──────────────────────────────────────────────
+// Configuración Telegram
+// ──────────────────────────────────────────────
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
-const CHAT_ID        = process.env.CHAT_ID;
+const CHAT_ID = process.env.CHAT_ID;
 const TG_URL = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`;
 
-function enviarATelegram(texto) {
+const messageQueue = [];
+setInterval(() => {
+  if (messageQueue.length === 0) return;
+  const { text } = messageQueue.shift();
+  fetch(TG_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ chat_id: CHAT_ID, text })
+  })
+    .then((r) => r.json())
+    .then((j) => {
+      if (!j.ok) console.error("❌ Telegram error:", j.description);
+    })
+    .catch((e) => console.error("❌ Telegram fetch err:", e.message));
+}, 50); // ≈20 msg/s
+
+function enviarATelegram(text) {
   if (!TELEGRAM_TOKEN || !CHAT_ID) {
-    console.error('❌ Falta TELEGRAM_TOKEN o CHAT_ID');
+    console.error("❌ Falta TELEGRAM_TOKEN o CHAT_ID");
     return;
   }
-  cola.push(texto);
+  messageQueue.push({ text });
 }
 
-// Cola anti‑spam (máx 20 msg/s) --------------------------------
-const cola = [];
-setInterval(() => {
-  if (cola.length === 0) return;
-  const bloque = cola.splice(0, 20); // hasta 20 mensajes por segundo
-  bloque.forEach(msg => {
-    fetch(TG_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat_id: CHAT_ID, text: msg })
-    }).then(r => r.json())
-      .then(j => { if (!j.ok) console.error('❌ Telegram error:', j.description); })
-      .catch(e => console.error('❌ Fetch Telegram:', e.message));
+// ──────────────────────────────────────────────
+// Express /health
+// ──────────────────────────────────────────────
+const app = express();
+const PORT = process.env.PORT || 8080;
+app.get("/health", (_, res) => res.send("✅ Bot activo"));
+app.listen(PORT, () => console.log(`🌐 HTTP server on ${PORT}`));
+
+// Mensaje inicial
+enviarATelegram("🚀 Bot activo");
+
+// Latido de logs
+setInterval(() => console.log("⏱️ Servicio en ejecución…"), 60000);
+
+// ──────────────────────────────────────────────
+// OKX WebSocket
+// ──────────────────────────────────────────────
+function connectOKX() {
+  const ws = new WebSocket("wss://ws.okx.com:8443/ws/v5/public");
+  let pingInt;
+  ws.on("open", () => {
+    console.log("🟢 Conectado a OKX");
+    enviarATelegram("🟢 OKX conectado");
+    ws.send(JSON.stringify({
+      op: "subscribe",
+      args: [{ channel: "liquidation-orders", instType: "SWAP" }]
+    }));
+    pingInt = setInterval(() => ws.send(JSON.stringify({ event: "ping" })), 15000);
   });
-}, 1000);
-
-// Mensaje de arranque
-enviarATelegram('🚀 Bot activo');
-
-// ─── Utilidad de reconexión genérica ──────────────────────
-function crearWS(nombre, url, onOpen, onMsg, getPingData = null, pingMs = 20000) {
-  let ws; let ping;
-  const conectar = () => {
-    ws = new WebSocket(url);
-    ws.on('open', () => {
-      console.log(`✅ WebSocket abierto en ${nombre}`);
-      onOpen(ws);
-      if (getPingData) ping = setInterval(() => ws.readyState === 1 && ws.send(getPingData()), pingMs);
-    });
-    ws.on('message', onMsg);
-    ws.on('close', () => {
-      console.warn(`🔴 ${nombre} desconectado. Reconectando en 5 s`);
-      clearInterval(ping);
-      setTimeout(conectar, 5000);
-    });
-    ws.on('error', err => console.error(`❌ ${nombre} WS error:`, err.message));
+  ws.on("message", (data) => {
+    const msg = JSON.parse(data);
+    if (msg.arg?.channel === "liquidation-orders" && msg.data) {
+      msg.data.forEach((d) => {
+        const price = Number(d.fillPx || d.bkPx);
+        const qty = Number(d.sz || d.accFillSz);
+        const usd = price && qty ? `$${(price * qty).toLocaleString()}` : "$–";
+        const texto = `🟢 #${d.instId} Liquidated ${d.side === "buy" ? "Long" : "Short"}: ${usd} at $${price || "–"}`;
+        console.log(texto);
+        enviarATelegram(texto);
+      });
+    }
+  });
+  const restart = () => {
+    clearInterval(pingInt);
+    setTimeout(connectOKX, 5000);
   };
-  conectar();
-  return () => { try { ws.close(); } catch(e){} };
+  ws.on("close", restart);
+  ws.on("error", restart);
 }
+connectOKX();
 
-// ─── Binance (!forceOrder@arr) ─────────────────────────────
-crearWS('Binance', 'wss://fstream.binance.com/ws/!forceOrder@arr',
-  () => {},
-  data => {
+// ──────────────────────────────────────────────
+// Binance WebSocket (!forceOrder@arr)
+// ──────────────────────────────────────────────
+function connectBinance() {
+  const ws = new WebSocket("wss://fstream.binance.com/ws/!forceOrder@arr");
+  let pingInt;
+  ws.on("open", () => {
+    console.log("🟡 Conectado a Binance");
+    enviarATelegram("🟡 Binance conectado");
+    pingInt = setInterval(() => ws.ping(), 30000);
+  });
+  ws.on("message", (data) => {
     const msg = JSON.parse(data);
-    if (msg.e !== 'forceOrder') return;
-    const monto = (parseFloat(msg.o.p) * parseFloat(msg.o.q)).toLocaleString();
-    const texto = `🟡 #${msg.o.s} Liquidated ${msg.o.S}: $${monto} at $${msg.o.p}`;
-    console.log(texto);
-    enviarATelegram(texto);
-  }
-);
-
-// ─── OKX (liquidation-orders) ──────────────────────────────
-crearWS('OKX', 'wss://ws.okx.com:8443/ws/v5/public',
-  ws => ws.send(JSON.stringify({ op: 'subscribe', args: [{ channel: 'liquidation-orders', instType: 'SWAP' }] })),
-  data => {
-    const msg = JSON.parse(data);
-    if (msg.arg?.channel !== 'liquidation-orders') return;
-    msg.data?.forEach(d => {
-      const price = Number(d.fillPx || d.bkPx);
-      const qty   = Number(d.sz || d.accFillSz);
-      const side  = d.side === 'buy' ? 'Long' : 'Short';
-      const monto = (!isNaN(price) && !isNaN(qty)) ? (price * qty).toLocaleString() : '–';
-      const texto = `🟢 #${d.instId} Liquidated ${side}: $${monto} at $${isNaN(price) ? '–' : price}`;
+    if (msg.e === "forceOrder") {
+      const p = Number(msg.o.p);
+      const q = Number(msg.o.q);
+      const usd = p && q ? `$${(p * q).toLocaleString()}` : "$–";
+      const texto = `🟡 #${msg.o.s} Liquidated ${msg.o.S}: ${usd} at $${p || "–"}`;
       console.log(texto);
       enviarATelegram(texto);
-    });
-  },
-  () => JSON.stringify({ event: 'ping' }), 15000
-);
+    }
+  });
+  const restart = () => {
+    clearInterval(pingInt);
+    setTimeout(connectBinance, 5000);
+  };
+  ws.on("close", restart);
+  ws.on("error", restart);
+}
+connectBinance();
 
-// ─── Huobi (pares dinámicos) ───────────────────────────────
-let cerrarHuobi = () => {};
-
-async function obtenerParesHuobi() {
-  try {
-    const res = await fetch('https://api.hbdm.com/linear-swap-api/v1/swap_contract_info');
-    const json = await res.json();
-    return [...new Set(json.data.filter(c => c.contract_code.endsWith('-USDT')).map(c => c.contract_code))];
-  } catch (e) {
-    console.error('❌ Error al obtener pares Huobi:', e.message);
-    return [];
-  }
+// ──────────────────────────────────────────────
+// Huobi – REST fetch de pares + WebSocket con gzip
+// ──────────────────────────────────────────────
+const HUOBI_REST_URL = "https://api.hbdm.com/linear-swap-api/v1/swap_contract_info";
+let huobiPairs = [];
+function fetchHuobiPairs() {
+  fetch(HUOBI_REST_URL)
+    .then((r) => r.json())
+    .then((j) => {
+      huobiPairs = (j.data || [])
+        .filter((c) => c.contract_code.endsWith("USDT"))
+        .map((c) => c.contract_code.toUpperCase());
+      console.log("🔴 Pares Huobi actualizados:", huobiPairs.length);
+      connectHuobi(); // Reconecta para re‑suscribirse
+    })
+    .catch((e) => console.error("❌ Error fetch Huobi REST:", e.message));
 }
 
-function conectarHuobi(pares) {
-  if (!pares.length) {
-    console.warn('⚠️ Sin pares Huobi para suscribirse');
-    return;
+function connectHuobi() {
+  if (typeof connectHuobi.ws !== "undefined") {
+    try { connectHuobi.ws.close(); } catch {}
   }
-  cerrarHuobi(); // cierra conexión previa si existe
-
-  let ws;
-  cerrarHuobi = () => { try { ws && ws.close(); } catch(e){} };
-
-  ws = new WebSocket('wss://api.hbdm.com/linear-swap-ws');
-
-  ws.on('open', () => {
-    console.log('🔵 WebSocket abierto en Huobi');
-    pares.forEach(par => {
-      ws.send(JSON.stringify({ op: 'sub', topic: `public.${par.replace('-', '')}.liquidation_orders`, cid: `${par}-liq` }));
+  const ws = new WebSocket("wss://api.hbdm.com/linear-swap-ws");
+  connectHuobi.ws = ws;
+  ws.on("open", () => {
+    console.log("🔴 Conectado a Huobi");
+    enviarATelegram("🔴 Huobi conectado");
+    huobiPairs.forEach((pair) => {
+      ws.send(JSON.stringify({
+        op: "sub",
+        topic: `public.${pair.toLowerCase()}.liquidation_orders`,
+        cid: `${pair}-liq`
+      }));
     });
   });
 
-  ws.on('message', data => {
-    let text;
+  ws.on("message", (data) => {
+    let msg;
     try {
-      text = typeof data === 'string' ? data : zlib.gunzipSync(data).toString();
-    } catch { return; }
-    if (text.includes('ping')) {
-      const ts = JSON.parse(text).ts;
-      ws.send(JSON.stringify({ pong: ts }));
+      // Huobi envía gzip
+      const decompressed = zlib.gunzipSync(data);
+      msg = JSON.parse(decompressed.toString());
+    } catch (e) {
+      console.error("❌ Error gzip Huobi:", e.message);
       return;
     }
-    const msg = JSON.parse(text);
-    if (!msg.topic || !msg.data) return;
-    const par = msg.topic.match(/public\.(.+?)\.liquidation_orders/)[1].toUpperCase();
-    const d   = msg.data;
-    const price = parseFloat(d.price);
-    const qty   = parseFloat(d.vol);
-    const side  = d.direction === 'buy' ? 'Long' : 'Short';
-    const monto = (!isNaN(price) && !isNaN(qty)) ? (price * qty).toLocaleString() : '–';
-    const texto = `🔵 #${par} Liquidated ${side}: $${monto} at $${isNaN(price) ? '–' : price}`;
-    console.log(texto);
-    enviarATelegram(texto);
+
+    if (msg.ping) { // Ping/pong
+      ws.send(JSON.stringify({ pong: msg.ping }));
+      return;
+    }
+
+    if (msg.ch && msg.tick?.data) {
+      const instId = msg.ch.split(".")[1].toUpperCase();
+      msg.tick.data.forEach((d) => {
+        const price = Number(d.price);
+        const qty = Number(d.vol);
+        const usd = price && qty ? `$${(price * qty).toLocaleString()}` : "$–";
+        const side = d.direction === "buy" ? "Long" : "Short";
+        const texto = `🔴 #${instId} Liquidated ${side}: ${usd} at $${price || "–"}`;
+        console.log(texto);
+        enviarATelegram(texto);
+      });
+    }
   });
 
-  ws.on('close', () => enviarATelegram('🔵 Huobi WebSocket cerrado'));
-  ws.on('error', err => enviarATelegram('❌ Error en Huobi WS: ' + err.message));
+  const restart = () => setTimeout(connectHuobi, 5000);
+  ws.on("close", restart);
+  ws.on("error", restart);
 }
 
-// Suscribirse inicialmente y refrescar cada hora
-(async function initHuobi() {
-  const pares = await obtenerParesHuobi();
-  console.log(`🔵 Huobi pares iniciales: ${pares.join(', ')}`);
-  conectarHuobi(pares);
-})();
-
-setInterval(async () => {
-  console.log('🔄 Actualizando lista de pares Huobi...');
-  const nuevos = await obtenerParesHuobi();
-  conectarHuobi(nuevos);
-}, 3600_000); // cada hora
-
-// ─── Latido general cada minuto ────────────────────────────
-setInterval(() => console.log('⏱️ Servicio sigue vivo…'), 60000);
+// Obtiene pares y establece refresh cada hora
+fetchHuobiPairs();
+setInterval(fetchHuobiPairs, 60 * 60 * 1000); // 1 hora
