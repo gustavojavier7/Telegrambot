@@ -1,12 +1,11 @@
 // ──────────────────────────────────────────────
-// index.js – Bot de liquidaciones (OKX + Binance + Huobi)
+// index.js – Bot de liquidaciones (OKX + Binance)
 // ==========================================================
 // Funciones clave:
 //   • Envía mensaje inicial "🚀 Bot activo" al arrancar.
 //   • Conexiones WebSocket:
 //       🟢 OKX  – channel: liquidation-orders  (ping keep‑alive 15 s)
 //       🟡 Binance – stream: !forceOrder@arr     (ping 30 s)
-//       🔴 Huobi  – linear-swap (REST + WS, gzip) (ping/pong + recarga de pares 1 h)
 //   • Reconexión automática con back‑off.
 //   • Cola anti‑spam (máx. 20 msg/s) para Telegram.
 //   • Variables de entorno: TELEGRAM_TOKEN, CHAT_ID  (mismas que en Cloud Run).
@@ -16,7 +15,6 @@ require("dotenv").config();
 const express = require("express");
 const fetch = require("node-fetch");
 const WebSocket = require("ws");
-const zlib = require("zlib"); // Para descomprimir mensajes gzip de Huobi
 
 // ──────────────────────────────────────────────
 // Configuración Telegram
@@ -132,76 +130,5 @@ function connectBinance() {
 connectBinance();
 
 // ──────────────────────────────────────────────
-// Huobi – REST fetch de pares + WebSocket con gzip
+// Fin del archivo
 // ──────────────────────────────────────────────
-const HUOBI_REST_URL = "https://api.hbdm.com/linear-swap-api/v1/swap_contract_info";
-let huobiPairs = [];
-function fetchHuobiPairs() {
-  fetch(HUOBI_REST_URL)
-    .then((r) => r.json())
-    .then((j) => {
-      huobiPairs = (j.data || [])
-        .filter((c) => c.contract_code.endsWith("USDT"))
-        .map((c) => c.contract_code.toUpperCase());
-      console.log("🔴 Pares Huobi actualizados:", huobiPairs.length);
-      connectHuobi(); // Reconecta para re‑suscribirse
-    })
-    .catch((e) => console.error("❌ Error fetch Huobi REST:", e.message));
-}
-
-function connectHuobi() {
-  if (typeof connectHuobi.ws !== "undefined") {
-    try { connectHuobi.ws.close(); } catch {}
-  }
-  const ws = new WebSocket("wss://api.hbdm.com/linear-swap-ws");
-  connectHuobi.ws = ws;
-  ws.on("open", () => {
-    console.log("🔴 Conectado a Huobi");
-    enviarATelegram("🔴 Huobi conectado");
-    huobiPairs.forEach((pair) => {
-      ws.send(JSON.stringify({
-        op: "sub",
-        topic: `public.${pair.toLowerCase()}.liquidation_orders`,
-        cid: `${pair}-liq`
-      }));
-    });
-  });
-
-  ws.on("message", (data) => {
-    let msg;
-    try {
-      // Huobi envía gzip
-      const decompressed = zlib.gunzipSync(data);
-      msg = JSON.parse(decompressed.toString());
-    } catch (e) {
-      console.error("❌ Error gzip Huobi:", e.message);
-      return;
-    }
-
-    if (msg.ping) { // Ping/pong
-      ws.send(JSON.stringify({ pong: msg.ping }));
-      return;
-    }
-
-    if (msg.ch && msg.tick?.data) {
-      const instId = msg.ch.split(".")[1].toUpperCase();
-      msg.tick.data.forEach((d) => {
-        const price = Number(d.price);
-        const qty = Number(d.vol);
-        const usd = price && qty ? `$${(price * qty).toLocaleString()}` : "$–";
-        const side = d.direction === "buy" ? "Long" : "Short";
-        const texto = `🔴 #${instId} Liquidated ${side}: ${usd} at $${price || "–"}`;
-        console.log(texto);
-        enviarATelegram(texto);
-      });
-    }
-  });
-
-  const restart = () => setTimeout(connectHuobi, 5000);
-  ws.on("close", restart);
-  ws.on("error", restart);
-}
-
-// Obtiene pares y establece refresh cada hora
-fetchHuobiPairs();
-setInterval(fetchHuobiPairs, 60 * 60 * 1000); // 1 hora
