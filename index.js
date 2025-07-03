@@ -145,7 +145,8 @@ function connectOKX() {
     } catch (e) { console.error("❌ Err OKX:", e.message); }
   });
   const restart = () => { clearInterval(pingInt); setTimeout(connectOKX, Math.pow(2, Math.min(5, reconnectAttempts++)) * 1000); };
-  ws.on("close", restart); ws.on("error", restart);
+  ws.on("close", () => { enviarATelegram("🔌 OKX desconectado"); restart(); });
+  ws.on("error", () => { enviarATelegram("❌ Error en conexión OKX"); restart(); });
 }
 connectOKX();
 
@@ -168,6 +169,7 @@ function connectBinance() {
     } catch (e) { console.error("❌ Err Binance:", e.message); }
   });
   const restart = () => { clearInterval(pingInt); setTimeout(connectBinance, Math.pow(2, Math.min(5, reconnectAttempts++)) * 1000); };
-  ws.on("close", restart); ws.on("error", restart);
+  ws.on("close", () => { enviarATelegram("🔌 Binance desconectado"); restart(); });
+  ws.on("error", () => { enviarATelegram("❌ Error en conexión Binance"); restart(); });
 }
 connectBinance();
