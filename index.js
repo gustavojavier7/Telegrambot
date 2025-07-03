@@ -1,43 +1,50 @@
 // index.js – Bot de liquidaciones (OKX + Binance)
 // ==========================================================
-// Versión: 2.2.0  ← 2025‑07‑03
-// • Ventana deslizante 5 min para estadísticas BUY/SELL.
-// • Reporte automático cada 2.5 min (150 000 ms) en Markdown.
-// • Precisión de timestamp HH:MM:SS.mmm.
-// • Se mantienen: lote ≤ 4 000 caracteres, 1 msg/s, backoff 429, WS OKX & Binance.
+// Versión: 2.3.0  ← 2025‑07‑03
+// • Ventanas deslizantes 5m, 15m, 30m, 1h para estadísticas BUY/SELL.
+// • Reporte automático cada 5 min (300 000 ms) en Markdown.
+// • Precisión HH:MM:SS.mmm. Nombres de exchange entre corchetes.
+// • Se mantienen: lote ≤ 4‌000 caracteres, 1‌msg/s, backoff 429, WS OKX & Binance.
 
 require("dotenv").config();
 const express = require("express");
 const fetch = require("node-fetch");
 const WebSocket = require("ws");
 
-// ──────────────────────────────────────────────
-// Configuración Telegram
-// ──────────────────────────────────────────────
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const CHAT_ID = process.env.CHAT_ID;
 const TG_URL = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`;
 
-// Cola de envío y control de tasa ------------------------------------------------
 const messageQueue = [];
 let lastSentTime = 0;
-const MIN_INTERVAL_MS = 1000; // 1 msg / s
+const MIN_INTERVAL_MS = 1000;
 
-// Ventana deslizante de eventos (5 min) ----------------------------------------
-const eventos = []; // { ts, tipo }
+// Ventanas deslizantes
+const ventanas = {
+  '5m': [],
+  '15m': [],
+  '30m': [],
+  '1h': []
+};
+const DURACIONES = {
+  '5m': 5 * 60 * 1000,
+  '15m': 15 * 60 * 1000,
+  '30m': 30 * 60 * 1000,
+  '1h': 60 * 60 * 1000
+};
 
 function addEvento(tipo) {
-  eventos.push({ ts: Date.now(), tipo });
+  const ts = Date.now();
+  for (const key of Object.keys(ventanas)) {
+    ventanas[key].push({ ts, tipo });
+  }
 }
 
-// ------------------------------------------------------------- Procesador cola
 setInterval(async () => {
   if (messageQueue.length === 0 || Date.now() - lastSentTime < MIN_INTERVAL_MS) return;
-
   const lotes = [];
   let lote = [];
   let totalLength = 0;
-
   for (let i = 0; i < messageQueue.length; i++) {
     const texto = messageQueue[i].text;
     if (texto.length > 3990) {
@@ -52,7 +59,6 @@ setInterval(async () => {
     }
   }
   if (lote.length > 0) lotes.push(lote);
-
   for (let i = 0; i < lotes.length; i++) {
     const encabezado = lotes.length > 1 ? `***[mensajes en lote ${i + 1}/${lotes.length}]***\n` : "";
     const texto = encabezado + lotes[i].join("\n");
@@ -89,41 +95,39 @@ function enviarATelegram(text) {
   if (typeof text === "string" && text.length) messageQueue.push({ text });
 }
 
-// ------------------------------------------------------------- Express /health
 const app = express();
 const PORT = process.env.PORT || 8080;
 app.get("/health", (_, res) => res.send("✅ Bot activo"));
 app.listen(PORT, () => console.log(`🌐 HTTP server on ${PORT}`));
 
-// Mensaje inicial y latido -------------------------------------------------------
 enviarATelegram("🚀 Bot activo");
 setInterval(() => console.log("⏱️ Servicio en ejecución…"), 60000);
 
-// ------------------------------------------------------------- Estadísticas 5 min
 function enviarEstadisticas() {
   const ahora = Date.now();
-  const haceCinco = ahora - 5 * 60 * 1000;
-  // Limpiar eventos viejos
-  while (eventos.length && eventos[0].ts < haceCinco) eventos.shift();
-  const total = eventos.length;
-  if (!total) return; // solo si hubo actividad
-
-  const buy = eventos.filter(e => e.tipo === "buy").length;
-  const sell = total - buy;
-  const ratio = ((buy / total) * 100).toFixed(1);
   const hhmmss = new Date(ahora).toISOString().split("T")[1].replace("Z", "");
-  const msg = `*Estadísticas para la hora: ${hhmmss}*\n• Total: ${total}\n• BUY/LONG: ${buy}\n• SELL/SHORT: ${sell}\n• % BUY: ${ratio}%`;
-  enviarATelegram(msg);
+  const lines = [`*Estadísticas de liquidaciones (actualizado ${hhmmss})*\n`];
+  for (const key of Object.keys(ventanas)) {
+    const limite = ahora - DURACIONES[key];
+    while (ventanas[key].length && ventanas[key][0].ts < limite) ventanas[key].shift();
+    const eventos = ventanas[key];
+    const total = eventos.length;
+    if (total === 0) continue;
+    const buy = eventos.filter(e => e.tipo === "buy").length;
+    const sell = total - buy;
+    const ratio = ((buy / total) * 100).toFixed(1);
+    lines.push(`• Últimos ${key}:\n  – BUY: ${buy} | SELL: ${sell} | % BUY: ${ratio}%`);
+  }
+  if (lines.length > 1) enviarATelegram(lines.join("\n"));
 }
-setInterval(enviarEstadisticas, 150000); // 2.5 min
+setInterval(enviarEstadisticas, 300000);
 
-// ------------------------------------------------------------- OKX WebSocket
 function connectOKX() {
   const ws = new WebSocket("wss://ws.okx.com:8443/ws/v5/public");
   let pingInt, reconnectAttempts = 0;
   ws.on("open", () => {
     console.log("🟢 Conectado a OKX");
-    enviarATelegram("🟢 OKX conectado");
+    enviarATelegram("[OKX] conectado");
     ws.send(JSON.stringify({ op: "subscribe", args: [{ channel: "liquidation-orders", instType: "SWAP" }] }));
     pingInt = setInterval(() => ws.send(JSON.stringify({ event: "ping" })), 15000);
   });
@@ -137,7 +141,8 @@ function connectOKX() {
           const usd = price && qty ? `$${(price * qty).toLocaleString()}` : "$–";
           const tipo = d.side === "buy" ? "buy" : "sell";
           addEvento(tipo);
-          const texto = `🟢 #${d.instId || "unknown"} Liquidated ${tipo === "buy" ? "Long" : "Short"}: ${usd} at $${price || "–"}`;
+          const emoji = tipo === "buy" ? "🟥" : "🟩";
+          const texto = `${emoji} [OKX] #${d.instId || "unknown"} Liquidated ${tipo === "buy" ? "Long" : "Short"}: ${usd} at $${price || "–"}`;
           console.log(texto);
           enviarATelegram(texto);
         });
@@ -145,16 +150,19 @@ function connectOKX() {
     } catch (e) { console.error("❌ Err OKX:", e.message); }
   });
   const restart = () => { clearInterval(pingInt); setTimeout(connectOKX, Math.pow(2, Math.min(5, reconnectAttempts++)) * 1000); };
-  ws.on("close", () => { enviarATelegram("🔌 OKX desconectado"); restart(); });
-  ws.on("error", () => { enviarATelegram("❌ Error en conexión OKX"); restart(); });
+  ws.on("close", () => { enviarATelegram("[OKX] 🔌 desconectado"); restart(); });
+  ws.on("error", () => { enviarATelegram("[OKX] ❌ error en conexión"); restart(); });
 }
 connectOKX();
 
-// ------------------------------------------------------------- Binance WebSocket
 function connectBinance() {
   const ws = new WebSocket("wss://fstream.binance.com/ws/!forceOrder@arr");
   let pingInt, reconnectAttempts = 0;
-  ws.on("open", () => { console.log("🟡 Conectado a Binance"); enviarATelegram("🟡 Binance conectado"); pingInt = setInterval(() => ws.ping(), 30000); });
+  ws.on("open", () => {
+    console.log("🟡 Conectado a Binance");
+    enviarATelegram("[BINANCE] conectado");
+    pingInt = setInterval(() => ws.ping(), 30000);
+  });
   ws.on("message", (data) => {
     try {
       const msg = JSON.parse(data);
@@ -163,13 +171,14 @@ function connectBinance() {
         const usd = p && q ? `$${(p * q).toLocaleString()}` : "$–";
         const tipo = msg.o.S.toUpperCase() === "BUY" ? "buy" : "sell";
         addEvento(tipo);
-        const texto = `🟡 #${msg.o.s || "unknown"} Liquidated ${msg.o.S || "unknown"}: ${usd} at $${p || "–"}`;
+        const emoji = tipo === "buy" ? "🟥" : "🟩";
+        const texto = `${emoji} [BINANCE] #${msg.o.s || "unknown"} Liquidated ${msg.o.S || "unknown"}: ${usd} at $${p || "–"}`;
         console.log(texto); enviarATelegram(texto);
       }
     } catch (e) { console.error("❌ Err Binance:", e.message); }
   });
   const restart = () => { clearInterval(pingInt); setTimeout(connectBinance, Math.pow(2, Math.min(5, reconnectAttempts++)) * 1000); };
-  ws.on("close", () => { enviarATelegram("🔌 Binance desconectado"); restart(); });
-  ws.on("error", () => { enviarATelegram("❌ Error en conexión Binance"); restart(); });
+  ws.on("close", () => { enviarATelegram("[BINANCE] 🔌 desconectado"); restart(); });
+  ws.on("error", () => { enviarATelegram("[BINANCE] ❌ error en conexión"); restart(); });
 }
 connectBinance();
