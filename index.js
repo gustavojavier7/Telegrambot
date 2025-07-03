@@ -1,7 +1,7 @@
 // index.js – Bot de liquidaciones (OKX + Binance)
 // ==========================================================
 // Versión: 2.3.0  ← 2025-07-03
-// • Colores invertidos para reflejar presión de mercado: 🟥 compra forzada, 🟩 venta forzada.
+// • Colores invertidos para reflejar presión de mercado: 🟥 venta forzada, 🟩 compra forzada.
 // • Reportes regulares incluyen % BUY/SELL y se envían cada 2.5 min (para 5m) y 5 min (para 15m, 30m, 1h).
 // • Se mantienen: ventana deslizante, lote ≤ 4‌000 caracteres, 1 msg/s, backoff 429, WS OKX & Binance.
 
@@ -150,7 +150,7 @@ function connectOKX() {
           const usd = price && qty ? `$${(price * qty).toLocaleString()}` : "$–";
           const tipo = d.side === "buy" ? "buy" : "sell";
           addEvento(tipo);
-          const emoji = tipo === "buy" ? "🟥" : "🟩";
+          const emoji = tipo === "buy" ? "🟩" : "🟥";
           const texto = `${emoji} [OKX] #${d.instId || "unknown"} Liquidated ${tipo === "buy" ? "Long" : "Short"}: ${usd} at $${price || "–"}`;
           console.log(texto);
           enviarATelegram(texto);
@@ -180,7 +180,7 @@ function connectBinance() {
         const usd = p && q ? `$${(p * q).toLocaleString()}` : "$–";
         const tipo = msg.o.S.toUpperCase() === "BUY" ? "buy" : "sell";
         addEvento(tipo);
-        const emoji = tipo === "buy" ? "🟥" : "🟩";
+        const emoji = tipo === "buy" ? "🟩" : "🟥";
         const texto = `${emoji} [BINANCE] #${msg.o.s || "unknown"} Liquidated ${msg.o.S || "unknown"}: ${usd} at $${p || "–"}`;
         console.log(texto); enviarATelegram(texto);
       }
