@@ -1,10 +1,9 @@
 // index.js – Bot de liquidaciones (OKX + Binance)
 // ==========================================================
-// Versión: 2.3.0  ← 2025‑07‑03
-// • Ventanas deslizantes 5m, 15m, 30m, 1h para estadísticas BUY/SELL.
-// • Reporte automático cada 5 min (300 000 ms) en Markdown.
-// • Precisión HH:MM:SS.mmm. Nombres de exchange entre corchetes.
-// • Se mantienen: lote ≤ 4‌000 caracteres, 1‌msg/s, backoff 429, WS OKX & Binance.
+// Versión: 2.3.0  ← 2025-07-03
+// • Colores invertidos para reflejar presión de mercado: 🟥 compra forzada, 🟩 venta forzada.
+// • Reportes regulares incluyen % BUY/SELL y se envían cada 2.5 min (para 5m) y 5 min (para 15m, 30m, 1h).
+// • Se mantienen: ventana deslizante, lote ≤ 4‌000 caracteres, 1 msg/s, backoff 429, WS OKX & Binance.
 
 require("dotenv").config();
 const express = require("express");
@@ -19,25 +18,18 @@ const messageQueue = [];
 let lastSentTime = 0;
 const MIN_INTERVAL_MS = 1000;
 
-// Ventanas deslizantes
-const ventanas = {
-  '5m': [],
-  '15m': [],
-  '30m': [],
-  '1h': []
-};
-const DURACIONES = {
-  '5m': 5 * 60 * 1000,
-  '15m': 15 * 60 * 1000,
-  '30m': 30 * 60 * 1000,
-  '1h': 60 * 60 * 1000
-};
+// Eventos recientes para calcular estadísticas de ventanas deslizantes
+const eventos = []; // { ts, tipo }
+const MAX_EVENT_AGE = 60 * 60 * 1000; // 1 hora
+
+function limpiarEventos() {
+  const limite = Date.now() - MAX_EVENT_AGE;
+  while (eventos.length && eventos[0].ts < limite) eventos.shift();
+}
 
 function addEvento(tipo) {
-  const ts = Date.now();
-  for (const key of Object.keys(ventanas)) {
-    ventanas[key].push({ ts, tipo });
-  }
+  eventos.push({ ts: Date.now(), tipo });
+  limpiarEventos();
 }
 
 setInterval(async () => {
@@ -103,31 +95,48 @@ app.listen(PORT, () => console.log(`🌐 HTTP server on ${PORT}`));
 enviarATelegram("🚀 Bot activo");
 setInterval(() => console.log("⏱️ Servicio en ejecución…"), 60000);
 
-function enviarEstadisticas() {
+// Devuelve resumen de eventos en la ventana indicada en milisegundos
+function resumenEstadisticas(windowMs) {
   const ahora = Date.now();
-  const hhmmss = new Date(ahora).toISOString().split("T")[1].replace("Z", "");
-  const lines = [`*Estadísticas de liquidaciones (actualizado ${hhmmss})*\n`];
-  for (const key of Object.keys(ventanas)) {
-    const limite = ahora - DURACIONES[key];
-    while (ventanas[key].length && ventanas[key][0].ts < limite) ventanas[key].shift();
-    const eventos = ventanas[key];
-    const total = eventos.length;
-    if (total === 0) continue;
-    const buy = eventos.filter(e => e.tipo === "buy").length;
-    const sell = total - buy;
-    const ratio = ((buy / total) * 100).toFixed(1);
-    lines.push(`• Últimos ${key}:\n  – BUY: ${buy} | SELL: ${sell} | % BUY: ${ratio}%`);
-  }
-  if (lines.length > 1) enviarATelegram(lines.join("\n"));
+  const desde = ahora - windowMs;
+  const recientes = eventos.filter(e => e.ts >= desde);
+  const total = recientes.length;
+  if (!total) return null;
+  const buy = recientes.filter(e => e.tipo === 'buy').length;
+  const sell = total - buy;
+  const pctBuy = ((buy / total) * 100).toFixed(1);
+  const pctSell = ((sell / total) * 100).toFixed(1);
+  const label = `${(windowMs / 60000).toFixed(1)} min`;
+  return `• *${label}* → Total: ${total}, BUY: ${buy} (${pctBuy}%), SELL: ${sell} (${pctSell}%)`;
 }
-setInterval(enviarEstadisticas, 300000);
+
+// Reporte para la ventana de 5 minutos cada 2.5 minutos
+function enviarEstadisticas5m() {
+  const hhmmss = new Date().toISOString().split('T')[1].replace('Z', '');
+  const linea = resumenEstadisticas(5 * 60 * 1000);
+  if (linea) enviarATelegram(`*Estadísticas 5m ${hhmmss}*\n${linea}`);
+}
+
+// Reporte para ventanas de 15m, 30m y 1h cada 5 minutos
+function enviarEstadisticasLargas() {
+  const hhmmss = new Date().toISOString().split('T')[1].replace('Z', '');
+  const partes = [
+    resumenEstadisticas(15 * 60 * 1000),
+    resumenEstadisticas(30 * 60 * 1000),
+    resumenEstadisticas(60 * 60 * 1000)
+  ].filter(Boolean);
+  if (partes.length) enviarATelegram(`*Estadísticas ampliadas ${hhmmss}*\n${partes.join('\n')}`);
+}
+
+setInterval(enviarEstadisticas5m, 150000); // 2.5 min
+setInterval(enviarEstadisticasLargas, 300000); // 5 min
 
 function connectOKX() {
   const ws = new WebSocket("wss://ws.okx.com:8443/ws/v5/public");
   let pingInt, reconnectAttempts = 0;
   ws.on("open", () => {
     console.log("🟢 Conectado a OKX");
-    enviarATelegram("[OKX] conectado");
+    enviarATelegram("🟢 OKX conectado");
     ws.send(JSON.stringify({ op: "subscribe", args: [{ channel: "liquidation-orders", instType: "SWAP" }] }));
     pingInt = setInterval(() => ws.send(JSON.stringify({ event: "ping" })), 15000);
   });
@@ -150,8 +159,8 @@ function connectOKX() {
     } catch (e) { console.error("❌ Err OKX:", e.message); }
   });
   const restart = () => { clearInterval(pingInt); setTimeout(connectOKX, Math.pow(2, Math.min(5, reconnectAttempts++)) * 1000); };
-  ws.on("close", () => { enviarATelegram("[OKX] 🔌 desconectado"); restart(); });
-  ws.on("error", () => { enviarATelegram("[OKX] ❌ error en conexión"); restart(); });
+  ws.on("close", () => { enviarATelegram("🔌 OKX desconectado"); restart(); });
+  ws.on("error", () => { enviarATelegram("❌ Error en conexión OKX"); restart(); });
 }
 connectOKX();
 
@@ -160,7 +169,7 @@ function connectBinance() {
   let pingInt, reconnectAttempts = 0;
   ws.on("open", () => {
     console.log("🟡 Conectado a Binance");
-    enviarATelegram("[BINANCE] conectado");
+    enviarATelegram("🟡 Binance conectado");
     pingInt = setInterval(() => ws.ping(), 30000);
   });
   ws.on("message", (data) => {
@@ -178,7 +187,7 @@ function connectBinance() {
     } catch (e) { console.error("❌ Err Binance:", e.message); }
   });
   const restart = () => { clearInterval(pingInt); setTimeout(connectBinance, Math.pow(2, Math.min(5, reconnectAttempts++)) * 1000); };
-  ws.on("close", () => { enviarATelegram("[BINANCE] 🔌 desconectado"); restart(); });
-  ws.on("error", () => { enviarATelegram("[BINANCE] ❌ error en conexión"); restart(); });
+  ws.on("close", () => { enviarATelegram("🔌 Binance desconectado"); restart(); });
+  ws.on("error", () => { enviarATelegram("❌ Error en conexión Binance"); restart(); });
 }
 connectBinance();
