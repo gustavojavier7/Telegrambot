@@ -10,6 +10,9 @@ const express = require("express");
 const fetch = require("node-fetch");
 const WebSocket = require("ws");
 
+const { MetricServiceClient } = require('@google-cloud/monitoring');
+const monitoringClient = new MetricServiceClient();
+
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const CHAT_ID = process.env.CHAT_ID;
 const TG_URL = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`;
@@ -130,6 +133,48 @@ function enviarEstadisticasLargas() {
 
 setInterval(enviarEstadisticas5m, 150000); // 2.5 min
 setInterval(enviarEstadisticasLargas, 300000); // 5 min
+
+// ──────────────────────────────────────────────
+// Cloud Monitoring – Tráfico saliente Cloud Run
+// Versión desde 2.3.0
+// ──────────────────────────────────────────────
+async function obtenerTraficoSaliente() {
+  const [result] = await monitoringClient.listTimeSeries({
+    name: monitoringClient.projectPath(process.env.GCP_PROJECT_ID),
+    filter: `metric.type="run.googleapis.com/container/network/egress_bytes_count"`,
+    interval: {
+      startTime: { seconds: Math.floor(Date.now() / 1000) - 300 },
+      endTime: { seconds: Math.floor(Date.now() / 1000) },
+    },
+    view: 'FULL',
+  });
+
+  let totalBytes = 0;
+  result.forEach(serie => {
+    serie.points.forEach(p => {
+      totalBytes += Number(p.value.int64Value || 0);
+    });
+  });
+
+  return totalBytes;
+}
+
+async function enviarEstadisticaTrafico() {
+  try {
+    const bytes = await obtenerTraficoSaliente();
+    if (bytes > 0) {
+      const kb = (bytes / 1024).toFixed(2);
+      const ts = new Date().toISOString().split("T")[1].replace("Z", "");
+      const mensaje = `📈 *Tráfico saliente Cloud Run – ${ts}*\n• Últimos 5 min: *${kb} KB*`;
+      enviarATelegram(mensaje);
+    }
+  } catch (e) {
+    console.error("❌ Error consultando tráfico Cloud Run:", e.message);
+  }
+}
+
+// Ejecutar cada 5 minutos
+setInterval(enviarEstadisticaTrafico, 300000);
 
 function connectOKX() {
   const ws = new WebSocket("wss://ws.okx.com:8443/ws/v5/public");
