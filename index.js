@@ -1,16 +1,15 @@
-// ──────────────────────────────────────────────
 // index.js – Bot de liquidaciones (OKX + Binance)
 // ==========================================================
+// Versión: 2.1.0
 // Funciones clave:
 //   • Envía mensaje inicial "🚀 Bot activo" al arrancar.
 //   • Conexiones WebSocket:
 //       🟢 OKX  – channel: liquidation-orders  (ping keep‑alive 15 s)
 //       🟡 Binance – stream: !forceOrder@arr     (ping 30 s)
 //   • Reconexión automática con back‑off.
-//   • Cola anti‑spam (máx. 20 msg/s) para Telegram.
-//   • Detección de saturación y modo lote con límite de caracteres.
-//   • Variables de entorno: TELEGRAM_TOKEN, CHAT_ID  (mismas que en Cloud Run).
-// ──────────────────────────────────────────────
+//   • Cola anti‑spam y envío en lotes (máx. 4000 caracteres).
+//   • Manejo de error 429 (Too Many Requests) con reintentos exponenciales.
+//   • Variables de entorno: TELEGRAM_TOKEN, CHAT_ID (Cloud Run).
 
 require("dotenv").config();
 const express = require("express");
@@ -25,71 +24,78 @@ const CHAT_ID = process.env.CHAT_ID;
 const TG_URL = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`;
 
 const messageQueue = [];
-let sentTimestamps = []; // Para calcular la tasa de envío
-let batchMode = false;
+let lastSentTime = 0;
+const MIN_INTERVAL_MS = 1000;
 
-setInterval(() => {
-  // Remover timestamps viejos
-  const now = Date.now();
-  sentTimestamps = sentTimestamps.filter(ts => now - ts < 60000);
+setInterval(async () => {
+  if (messageQueue.length === 0 || Date.now() - lastSentTime < MIN_INTERVAL_MS) return;
 
-  // Evaluar tasa de mensajes
-  const rate = sentTimestamps.length / 60;
-  const limitePorSegundo = 20;
+  const lotes = [];
+  let lote = [];
+  let totalLength = 0;
 
-  if (rate > limitePorSegundo * 0.8) {
-    if (!batchMode) {
-      batchMode = true;
-      enviarATelegram("⚠️ Ratio mensajes/minuto mayor al 80%. Activando modo lote.");
-    }
-  } else {
-    batchMode = false;
-  }
-
-  if (messageQueue.length === 0) return;
-
-  if (!batchMode) {
-    const { text } = messageQueue.shift();
-    sendToTelegram(text);
-  } else {
-    let lote = [];
-    let totalLength = 0;
-    while (messageQueue.length > 0 && lote.length < 100) {
-      const { text } = messageQueue[0];
-      if (totalLength + text.length + 1 > 4000) break;
-      lote.push(text);
-      totalLength += text.length + 1;
-      messageQueue.shift();
-    }
-    if (lote.length > 0) {
-      sendToTelegram("***[mensajes en lote]***\n" + lote.join("\n"));
+  for (let i = 0; i < messageQueue.length; i++) {
+    const texto = messageQueue[i].text;
+    if (texto.length > 3990) {
+      lote.push(texto.slice(0, 3990) + " […]");
+    } else if (totalLength + texto.length + 1 > 4000) {
+      lotes.push(lote);
+      lote = [texto];
+      totalLength = texto.length + 1;
+    } else {
+      lote.push(texto);
+      totalLength += texto.length + 1;
     }
   }
-}, 50); // ≈20 msg/s
 
-function sendToTelegram(text) {
+  if (lote.length > 0) lotes.push(lote);
+
+  for (let i = 0; i < lotes.length; i++) {
+    const encabezado = lotes.length > 1 ? `***[mensajes en lote ${i + 1}/${lotes.length}]***\n` : "";
+    const texto = encabezado + lotes[i].join("\n");
+    await sendToTelegram(texto);
+    lastSentTime = Date.now();
+    await new Promise((r) => setTimeout(r, MIN_INTERVAL_MS));
+  }
+
+  messageQueue.splice(0, messageQueue.length);
+}, 250);
+
+async function sendToTelegram(text, retryCount = 0) {
   if (!TELEGRAM_TOKEN || !CHAT_ID) {
     console.error("❌ Falta TELEGRAM_TOKEN o CHAT_ID");
     return;
   }
-  fetch(TG_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ chat_id: CHAT_ID, text })
-  })
-    .then(r => r.json())
-    .then(j => {
-      if (!j.ok) {
-        console.error("❌ Telegram error:", j.description);
+
+  try {
+    const response = await fetch(TG_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: CHAT_ID, text })
+    });
+    const json = await response.json();
+    if (!json.ok) {
+      if (json.error_code === 429 && retryCount < 3) {
+        const wait = Math.pow(2, retryCount) * 1000;
+        console.warn(`⚠️ 429 Too Many Requests, reintentando en ${wait}ms`);
+        setTimeout(() => sendToTelegram(text, retryCount + 1), wait);
       } else {
-        sentTimestamps.push(Date.now());
+        console.error("❌ Telegram error:", json.description);
       }
-    })
-    .catch(e => console.error("❌ Telegram fetch err:", e.message));
+    } else {
+      console.log("✅ Mensaje enviado a Telegram");
+    }
+  } catch (e) {
+    console.error("❌ Telegram fetch err:", e.message);
+  }
 }
 
 function enviarATelegram(text) {
-  messageQueue.push({ text });
+  if (typeof text === "string" && text.length > 0) {
+    messageQueue.push({ text });
+  } else {
+    console.warn("⚠️ Intento de encolar mensaje inválido:", text);
+  }
 }
 
 // ──────────────────────────────────────────────
@@ -100,10 +106,7 @@ const PORT = process.env.PORT || 8080;
 app.get("/health", (_, res) => res.send("✅ Bot activo"));
 app.listen(PORT, () => console.log(`🌐 HTTP server on ${PORT}`));
 
-// Mensaje inicial
 enviarATelegram("🚀 Bot activo");
-
-// Latido de logs
 setInterval(() => console.log("⏱️ Servicio en ejecución…"), 60000);
 
 // ──────────────────────────────────────────────
@@ -122,22 +125,27 @@ function connectOKX() {
     pingInt = setInterval(() => ws.send(JSON.stringify({ event: "ping" })), 15000);
   });
   ws.on("message", (data) => {
-    const msg = JSON.parse(data);
-    if (msg.arg?.channel === "liquidation-orders" && msg.data) {
-      msg.data.forEach((d) => {
-        const price = Number(d.fillPx || d.bkPx);
-        const qty = Number(d.sz || d.accFillSz);
-        const usd = price && qty ? `$${(price * qty).toLocaleString()}` : "$–";
-        const texto = `🟢 #${d.instId} Liquidated ${d.side === "buy" ? "Long" : "Short"}: ${usd} at $${price || "–"}`;
-        console.log(texto);
-        enviarATelegram(texto);
-      });
+    try {
+      const msg = JSON.parse(data);
+      if (msg.arg?.channel === "liquidation-orders" && Array.isArray(msg.data)) {
+        msg.data.forEach((d) => {
+          const price = Number(d.fillPx || d.bkPx || 0);
+          const qty = Number(d.sz || d.accFillSz || 0);
+          const usd = price && qty ? `$${(price * qty).toLocaleString()}` : "$–";
+          const texto = `🟢 #${d.instId || "unknown"} Liquidated ${d.side === "buy" ? "Long" : "Short"}: ${usd} at $${price || "–"}`;
+          console.log(texto);
+          enviarATelegram(texto);
+        });
+      }
+    } catch (e) {
+      console.error("❌ Error procesando mensaje OKX:", e.message);
     }
   });
   const restart = () => {
     clearInterval(pingInt);
-    setTimeout(connectOKX, 5000);
+    setTimeout(connectOKX, Math.pow(2, Math.min(5, reconnectAttempts++)) * 1000);
   };
+  let reconnectAttempts = 0;
   ws.on("close", restart);
   ws.on("error", restart);
 }
@@ -155,20 +163,25 @@ function connectBinance() {
     pingInt = setInterval(() => ws.ping(), 30000);
   });
   ws.on("message", (data) => {
-    const msg = JSON.parse(data);
-    if (msg.e === "forceOrder") {
-      const p = Number(msg.o.p);
-      const q = Number(msg.o.q);
-      const usd = p && q ? `$${(p * q).toLocaleString()}` : "$–";
-      const texto = `🟡 #${msg.o.s} Liquidated ${msg.o.S}: ${usd} at $${p || "–"}`;
-      console.log(texto);
-      enviarATelegram(texto);
+    try {
+      const msg = JSON.parse(data);
+      if (msg.e === "forceOrder" && msg.o) {
+        const p = Number(msg.o.p || 0);
+        const q = Number(msg.o.q || 0);
+        const usd = p && q ? `$${(p * q).toLocaleString()}` : "$–";
+        const texto = `🟡 #${msg.o.s || "unknown"} Liquidated ${msg.o.S || "unknown"}: ${usd} at $${p || "–"}`;
+        console.log(texto);
+        enviarATelegram(texto);
+      }
+    } catch (e) {
+      console.error("❌ Error procesando mensaje Binance:", e.message);
     }
   });
   const restart = () => {
     clearInterval(pingInt);
-    setTimeout(connectBinance, 5000);
+    setTimeout(connectBinance, Math.pow(2, Math.min(5, reconnectAttempts++)) * 1000);
   };
+  let reconnectAttempts = 0;
   ws.on("close", restart);
   ws.on("error", restart);
 }
