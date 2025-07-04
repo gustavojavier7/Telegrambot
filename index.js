@@ -21,6 +21,33 @@ const messageQueue = [];
 let lastSentTime = 0;
 const MIN_INTERVAL_MS = 1000;
 
+// Historial de envíos (últimos 60 s) para calcular la media de intervalos
+const sentTimestamps = [];           // guarda Date.now() de cada envío real
+
+function registrarEnvio() {          // se llama justo DESPUÉS de enviar a Telegram
+  const ahora = Date.now();
+  sentTimestamps.push(ahora);
+  // Limpiar entradas de más de 60 s
+  while (sentTimestamps.length && sentTimestamps[0] < ahora - 60000) {
+    sentTimestamps.shift();
+  }
+}
+
+function mediaIntervalos() {         // devuelve media (ms) entre envíos últimos 60 s
+  if (sentTimestamps.length < 2) return 2000; // valor por defecto
+  let suma = 0;
+  for (let i = 1; i < sentTimestamps.length; i++) {
+    suma += sentTimestamps[i] - sentTimestamps[i - 1];
+  }
+  return suma / (sentTimestamps.length - 1);
+}
+
+// Intervalo dinámico (se actualiza tras cada envío)
+let intervaloMs = 1000;              // entre 1 s (máx. rápido) y 10 s (mín. rápido)
+const INTERVALO_MIN = 1000;          // 1 s  (límite superior de tasa → 1 msg/s)
+const INTERVALO_MAX = 10000;         // 10 s (límite inferior de tasa si hay datos)
+console.log(`🛂 Limitador dinámico activo: ${intervaloMs} ms`);
+
 // Eventos recientes para calcular estadísticas de ventanas deslizantes
 const eventos = []; // { ts, tipo }
 const MAX_EVENT_AGE = 60 * 60 * 1000; // 1 hora
@@ -36,7 +63,8 @@ function addEvento(tipo) {
 }
 
 setInterval(async () => {
-  if (messageQueue.length === 0 || Date.now() - lastSentTime < MIN_INTERVAL_MS) return;
+  // ¿Hay algo por enviar y ya venció el intervalo dinámico?
+  if (messageQueue.length === 0 || Date.now() - lastSentTime < intervaloMs) return;
   const lotes = [];
   let lote = [];
   let totalLength = 0;
@@ -59,7 +87,20 @@ setInterval(async () => {
     const texto = encabezado + lotes[i].join("\n");
     await sendToTelegram(texto);
     lastSentTime = Date.now();
-    await new Promise((r) => setTimeout(r, MIN_INTERVAL_MS));
+
+    // ──🧮 Cálculo ADAPTATIVO ─────────────────────────────────────────
+    registrarEnvio();                             // Guardamos timestamp
+    const media = mediaIntervalos();              // ms promedio último minuto
+    const transcurrido = Date.now() - lastSentTime; // ≈ 0 ms justo después de enviar
+    const ratio = transcurrido / media || 1;      // protección /0
+    // Escalamos intervalo proporcionalmente y lo acotamos
+    intervaloMs = Math.max(
+      INTERVALO_MIN,
+      Math.min(INTERVALO_MAX, Math.round(media * ratio))
+    );
+    // ─────────────────────────────────────────────────────────────────
+
+    await new Promise((r) => setTimeout(r, intervaloMs));
   }
   messageQueue.splice(0, messageQueue.length);
 }, 250);
