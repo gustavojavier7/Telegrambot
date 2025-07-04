@@ -65,11 +65,12 @@ function addEvento(tipo) {
 setInterval(async () => {
   // ¿Hay algo por enviar y ya venció el intervalo dinámico?
   if (messageQueue.length === 0 || Date.now() - lastSentTime < intervaloMs) return;
+  const snapshot = messageQueue.splice(0, messageQueue.length);
   const lotes = [];
   let lote = [];
   let totalLength = 0;
-  for (let i = 0; i < messageQueue.length; i++) {
-    const texto = messageQueue[i].text;
+  for (let i = 0; i < snapshot.length; i++) {
+    const texto = snapshot[i].text;
     if (texto.length > 3990) {
       lote.push(texto.slice(0, 3990) + " […]");
     } else if (totalLength + texto.length + 1 > 4000) {
@@ -102,7 +103,6 @@ setInterval(async () => {
 
     await new Promise((r) => setTimeout(r, intervaloMs));
   }
-  messageQueue.splice(0, messageQueue.length);
 }, 250);
 
 async function sendToTelegram(text, retryCount = 0) {
@@ -129,6 +129,16 @@ async function sendToTelegram(text, retryCount = 0) {
 
 function enviarATelegram(text) {
   if (typeof text === "string" && text.length) messageQueue.push({ text });
+}
+
+// Registra la liquidación en consola y valida que quede en la cola
+function logYEncolar(text) {
+  console.log(text);
+  enviarATelegram(text);
+  if (!messageQueue.some(m => m.text === text)) {
+    console.error("❌ Mensaje no encolado tras log, reintentando");
+    messageQueue.push({ text });
+  }
 }
 
 const app = express();
@@ -238,8 +248,7 @@ function connectOKX() {
           addEvento(tipo);
           const emoji = tipo === "buy" ? "🟩" : "🟥";
           const texto = `${emoji} [OKX] #${d.instId || "unknown"} Liquidated ${tipo === "buy" ? "Long" : "Short"}: ${usd} at $${price || "–"}`;
-          console.log(texto);
-          enviarATelegram(texto);
+          logYEncolar(texto);
         });
       }
     } catch (e) { console.error("❌ Err OKX:", e.message); }
@@ -268,7 +277,7 @@ function connectBinance() {
         addEvento(tipo);
         const emoji = tipo === "buy" ? "🟩" : "🟥";
         const texto = `${emoji} [BINANCE] #${msg.o.s || "unknown"} Liquidated ${msg.o.S || "unknown"}: ${usd} at $${p || "–"}`;
-        console.log(texto); enviarATelegram(texto);
+        logYEncolar(texto);
       }
     } catch (e) { console.error("❌ Err Binance:", e.message); }
   });
