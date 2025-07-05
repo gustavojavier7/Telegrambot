@@ -1,7 +1,7 @@
 // index.js – Bot de liquidaciones (OKX + Binance)
 // ==========================================================
-// Versión: 2.7.0  ← 2025-07-05
-// • Estrategia *Token Bucket* (ráfagas + descanso) ajustada a 0.3 msg/s.
+// Versión: 2.8.0  ← 2025-07-05
+// • Límite 18 msg/min con ventana deslizante
 // • Eliminado **por completo** el control de tráfico Cloud Run.
 // • Código reescrito y simplificado. Mantiene:
 //   - Lote ≤ 4 000 caracteres
@@ -15,16 +15,15 @@ const fetch = require("node-fetch");
 const WebSocket = require("ws");
 
 // ──────────────────────────────────────────────
-// Configuración Telegram + limitador Token Bucket
+// Configuración Telegram + limitador 18 msg/min
 // ──────────────────────────────────────────────
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const CHAT_ID = process.env.CHAT_ID;
 const TG_URL = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`;
 
-const TOKEN_CAP   = 20;
-const REFILL_RATE = Number(process.env.REFILL_RATE || 0.3);
-let availableTokens = TOKEN_CAP;
-let lastRefill = Date.now();
+const MAX_PER_MINUTE = 18;
+let availableTokens = MAX_PER_MINUTE;
+let currentMinute = Math.floor(Date.now() / 60000);
 
 const messageQueue = [];
 const AGRUPA_TAMANIO = 5;                 // tamaño orientativo (pivote)
@@ -53,15 +52,12 @@ function formatHora(ts) {
   return `[${h}:${m}:${s} GMT-3]`;
 }
 
-function refillTokens() {
-  const now = Date.now();
-  const elapsed = (now - lastRefill) / 1000;
-  availableTokens = Math.min(TOKEN_CAP, availableTokens + elapsed * REFILL_RATE);
-  lastRefill = now;
-}
-
 setInterval(async () => {
-  refillTokens();
+  const nowMinute = Math.floor(Date.now() / 60000);
+  if (nowMinute !== currentMinute) {
+    currentMinute = nowMinute;
+    availableTokens = MAX_PER_MINUTE;
+  }
 
   // Mientras haya tokens y mensajes, armar lotes ≤ 4 000 caracteres
   while (availableTokens >= 1 && messageQueue.length) {
@@ -80,17 +76,21 @@ setInterval(async () => {
     }
 
     // Formatear lote (con timestamp línea por línea)
-    const encabezado = formatHora(loteItems[0].timestamp);
     const body = loteItems
       .map(i => `${formatHora(i.timestamp)} ${i.text}`)
       .join("\n");
 
-    await sendToTelegram(`${encabezado} *Resumen de ${loteItems.length} liquidaciones:*\n${body}`);
+    if (loteItems.length === 1) {
+      await sendToTelegram(body);
+    } else {
+      const encabezado = formatHora(loteItems[0].timestamp);
+      await sendToTelegram(`${encabezado} *Resumen de ${loteItems.length} liquidaciones:*\n${body}`);
+    }
     lastMessageSent = new Date().toISOString();
     availableTokens -= 1;
   }
 
-  // Si no hay tokens, simplemente esperamos al próximo refill
+  // Si no hay tokens, esperamos al próximo minuto
 }, 250);
 
 async function sendToTelegram(text, retryCount = 0) {
@@ -148,7 +148,7 @@ app.get("/health", (_, res) => {
 });
 app.listen(PORT, () => console.log(`🌐 HTTP server on ${PORT}`));
 
-encolarMensaje("🚀 Bot activo (v2.7.0)");
+encolarMensaje("🚀 Bot activo (v2.8.0)");
 setInterval(() => console.log("⏱️ Servicio en ejecución…"), 60000);
 
 const eventos = [];
