@@ -27,8 +27,8 @@ let availableTokens = TOKEN_CAP;
 let lastRefill = Date.now();
 
 const messageQueue = [];
-const AGRUPA_TAMANIO = 5;
-const AGRUPA_SI_COLA_SUPERA = 10;
+const AGRUPA_TAMANIO = 5;                 // tamaño orientativo (pivote)
+const MAX_TG_LENGTH   = 4000;             // límite duro de Telegram
 const startTime = Date.now();
 let lastMessageSent = null;
 let okxConnected = false;
@@ -63,26 +63,34 @@ function refillTokens() {
 setInterval(async () => {
   refillTokens();
 
-  if (messageQueue.length >= AGRUPA_SI_COLA_SUPERA && availableTokens >= 1) {
-    const loteItems = messageQueue.splice(0, AGRUPA_TAMANIO);
-    const horaInicio = formatHora(loteItems[0].timestamp);
-    const loteConTs = loteItems
-      .map(item => `${formatHora(item.timestamp)} ${item.text}`)
+  // Mientras haya tokens y mensajes, armar lotes ≤ 4 000 caracteres
+  while (availableTokens >= 1 && messageQueue.length) {
+    let charCount = 0;
+    const loteItems = [];
+
+    // Empaquetar mensajes hasta rozar el límite o vaciar cola
+    while (messageQueue.length) {
+      const next = messageQueue[0];
+      // +1 por el \n que añadiremos
+      if (charCount + next.text.length + 1 > MAX_TG_LENGTH) break;
+      loteItems.push(messageQueue.shift());
+      charCount += next.text.length + 1;
+      // Salir si ya tenemos 5 para mantener lotes “manejables”
+      if (loteItems.length >= AGRUPA_TAMANIO) break;
+    }
+
+    // Formatear lote (con timestamp línea por línea)
+    const encabezado = formatHora(loteItems[0].timestamp);
+    const body = loteItems
+      .map(i => `${formatHora(i.timestamp)} ${i.text}`)
       .join("\n");
-    await sendToTelegram(
-      `${horaInicio} *Resumen de ${AGRUPA_TAMANIO} liquidaciones:*\n${loteConTs}`
-    );
+
+    await sendToTelegram(`${encabezado} *Resumen de ${loteItems.length} liquidaciones:*\n${body}`);
     lastMessageSent = new Date().toISOString();
     availableTokens -= 1;
-    return;
   }
 
-  while (messageQueue.length && availableTokens >= 1) {
-    const { text } = messageQueue.shift();
-    await sendToTelegram(text);
-    lastMessageSent = new Date().toISOString();
-    availableTokens -= 1;
-  }
+  // Si no hay tokens, simplemente esperamos al próximo refill
 }, 250);
 
 async function sendToTelegram(text, retryCount = 0) {
