@@ -29,6 +29,10 @@ let lastRefill = Date.now();
 const messageQueue = [];
 const AGRUPA_TAMANIO = 5;
 const AGRUPA_SI_COLA_SUPERA = 10;
+const startTime = Date.now();
+let lastMessageSent = null;
+let okxConnected = false;
+let binanceConnected = false;
 
 function formatTimestamp(ts) {
   const date = new Date(ts - 3 * 60 * 60 * 1000);
@@ -39,6 +43,14 @@ function formatTimestamp(ts) {
   const m = String(date.getUTCMinutes()).padStart(2, '0');
   const s = String(date.getUTCSeconds()).padStart(2, '0');
   return `[${Y}-${M}-${D} ${h}:${m}:${s} GMT-3]`;
+}
+
+function formatHora(ts) {
+  const date = new Date(ts - 3 * 60 * 60 * 1000);
+  const h = String(date.getUTCHours()).padStart(2, '0');
+  const m = String(date.getUTCMinutes()).padStart(2, '0');
+  const s = String(date.getUTCSeconds()).padStart(2, '0');
+  return `[${h}:${m}:${s} GMT-3]`;
 }
 
 function refillTokens() {
@@ -53,21 +65,22 @@ setInterval(async () => {
 
   if (messageQueue.length >= AGRUPA_SI_COLA_SUPERA && availableTokens >= 1) {
     const loteItems = messageQueue.splice(0, AGRUPA_TAMANIO);
-    const primerTimestamp = formatTimestamp(loteItems[0].timestamp);
+    const horaInicio = formatHora(loteItems[0].timestamp);
     const loteConTs = loteItems
-      .map(item => `${formatTimestamp(item.timestamp)} ${item.text}`)
+      .map(item => `${formatHora(item.timestamp)} ${item.text}`)
       .join("\n");
     await sendToTelegram(
-      `${primerTimestamp} *Resumen de ${AGRUPA_TAMANIO} liquidaciones:*\n${loteConTs}`
+      `${horaInicio} *Resumen de ${AGRUPA_TAMANIO} liquidaciones:*\n${loteConTs}`
     );
+    lastMessageSent = new Date().toISOString();
     availableTokens -= 1;
     return;
   }
 
   while (messageQueue.length && availableTokens >= 1) {
-    const { text, timestamp } = messageQueue.shift();
-    const formattedTs = formatTimestamp(timestamp);
-    await sendToTelegram(`${formattedTs} ${text}`);
+    const { text } = messageQueue.shift();
+    await sendToTelegram(text);
+    lastMessageSent = new Date().toISOString();
     availableTokens -= 1;
   }
 }, 250);
@@ -107,7 +120,24 @@ function logYEncolar(text, timestamp) {
 
 const app = express();
 const PORT = process.env.PORT || 8080;
-app.get("/health", (_, res) => res.send("✅ Bot activo"));
+app.get("/health", (_, res) => {
+  const uptimeMs = Date.now() - startTime;
+  const hrs = String(Math.floor(uptimeMs / 3600000)).padStart(2, '0');
+  const mins = String(Math.floor((uptimeMs % 3600000) / 60000)).padStart(2, '0');
+  const secs = String(Math.floor((uptimeMs % 60000) / 1000)).padStart(2, '0');
+  const recientes = eventos.filter(e => e.ts >= Date.now() - 5 * 60 * 1000);
+  const total = recientes.length;
+  const buy = recientes.filter(e => e.tipo === "buy").length;
+  const sell = total - buy;
+  res.json({
+    status: "ok",
+    uptime: `${hrs}:${mins}:${secs}`,
+    messagesInQueue: messageQueue.length,
+    lastMessageSent,
+    connectedExchanges: { okx: okxConnected, binance: binanceConnected },
+    eventStats: { last5min: { total, buy, sell } }
+  });
+});
 app.listen(PORT, () => console.log(`🌐 HTTP server on ${PORT}`));
 
 encolarMensaje("🚀 Bot activo (v2.7.0)");
@@ -164,6 +194,7 @@ function connectOKX() {
 
   ws.on("open", () => {
     console.log("🟢 Conectado a OKX");
+    okxConnected = true;
     encolarMensaje("🟢 OKX conectado");
     ws.send(JSON.stringify({ op: "subscribe", args: [{ channel: "liquidation-orders", instType: "SWAP" }] }));
     pingInt = setInterval(() => ws.send(JSON.stringify({ event: "ping" })), 15000);
@@ -192,6 +223,7 @@ function connectOKX() {
 
   const restart = () => {
     clearInterval(pingInt);
+    okxConnected = false;
     setTimeout(connectOKX, Math.pow(2, Math.min(5, reconnectAttempts++)) * 1000);
   };
 
@@ -206,6 +238,7 @@ function connectBinance() {
 
   ws.on("open", () => {
     console.log("🟡 Conectado a Binance");
+    binanceConnected = true;
     encolarMensaje("🟡 Binance conectado");
     pingInt = setInterval(() => ws.ping(), 30000);
   });
@@ -231,6 +264,7 @@ function connectBinance() {
 
   const restart = () => {
     clearInterval(pingInt);
+    binanceConnected = false;
     setTimeout(connectBinance, Math.pow(2, Math.min(5, reconnectAttempts++)) * 1000);
   };
 
