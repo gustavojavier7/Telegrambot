@@ -180,7 +180,7 @@ function connectOKX() {
           const usd   = price && qty ? `$${(price * qty).toLocaleString()}` : "$–";
           const tipo  = d.side === "buy" ? "buy" : "sell";
           addEvento(tipo);
-          const emoji = tipo === "buy" ? "" : "";
+          const emoji = tipo === "buy" ? "🟩" : "🟥";
           const texto = `${emoji} [OKX] #${d.instId || "unknown"} Liquidated ${tipo === "buy" ? "Long" : "Short"}: ${usd} at $${price || "–"}`;
           logYEncolar(texto, receptionTimestamp);
         });
@@ -220,7 +220,7 @@ function connectBinance() {
         const usd = p && q ? `$${(p * q).toLocaleString()}` : "$–";
         const tipo = msg.o.S.toUpperCase() === "BUY" ? "buy" : "sell";
         addEvento(tipo);
-        const emoji = tipo === "buy" ? "" : "";
+        const emoji = tipo === "buy" ? "🟩" : "🟥";
         const texto = `${emoji} [BINANCE] #${msg.o.s || "unknown"} Liquidated ${msg.o.S || "unknown"}: ${usd} at $${p || "–"}`;
         logYEncolar(texto, eventTimestamp);
       }
