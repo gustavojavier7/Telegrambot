@@ -75,15 +75,14 @@ setInterval(async () => {
       if (loteItems.length >= AGRUPA_TAMANIO) break;
     }
 
-    // Formatear lote (con timestamp línea por línea)
-    const body = loteItems
-      .map(i => `${formatHora(i.timestamp)} ${i.text}`)
-      .join("\n");
-
-    if (loteItems.length === 1) {
+    const todosSonReportes = loteItems.every(i => i.text.startsWith("*Estadísticas"));
+    let body;
+    if (loteItems.length === 1 || todosSonReportes) {
+      body = loteItems.map(i => i.text).join("\n");
       await sendToTelegram(body);
     } else {
       const encabezado = formatHora(loteItems[0].timestamp);
+      body = loteItems.map(i => `${formatHora(i.timestamp)} ${i.text}`).join("\n");
       await sendToTelegram(`${encabezado} *Resumen de ${loteItems.length} liquidaciones:*\n${body}`);
     }
     lastMessageSent = new Date().toISOString();
