@@ -90,7 +90,7 @@ setInterval(async () => {
   }
 
   // Si no hay tokens, esperamos al próximo minuto
-}, 250);
+}, 1000);
 
 async function sendToTelegram(text, retryCount = 0) {
   if (!TELEGRAM_TOKEN || !CHAT_ID) return console.error("❌ Falta TELEGRAM_TOKEN o CHAT_ID");
