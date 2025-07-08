@@ -26,7 +26,6 @@ let availableTokens = MAX_PER_MINUTE;
 let currentMinute = Math.floor(Date.now() / 60000);
 
 const messageQueue = [];
-const AGRUPA_TAMANIO = 5;                 // tamaño orientativo (pivote)
 const MAX_TG_LENGTH   = 4000;             // límite duro de Telegram
 const startTime = Date.now();
 let lastMessageSent = null;
@@ -71,8 +70,6 @@ setInterval(async () => {
       if (charCount + next.text.length + 1 > MAX_TG_LENGTH) break;
       loteItems.push(messageQueue.shift());
       charCount += next.text.length + 1;
-      // Salir si ya tenemos 5 para mantener lotes “manejables”
-      if (loteItems.length >= AGRUPA_TAMANIO) break;
     }
 
     const todosSonReportes = loteItems.every(i => i.text.startsWith("*Estadísticas"));
