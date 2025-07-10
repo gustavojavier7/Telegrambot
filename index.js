@@ -21,7 +21,7 @@ const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const CHAT_ID = process.env.CHAT_ID;
 const TG_URL = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`;
 
-const MAX_PER_MINUTE = 15;
+const MAX_PER_MINUTE = 12;
 let availableTokens = MAX_PER_MINUTE;
 let currentMinute = Math.floor(Date.now() / 60000);
 
